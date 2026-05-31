@@ -1,4 +1,4 @@
-# WordCreate
+﻿# WordCreate
 
 A Claude Code skill for structured .docx document modification — replace text, rewrite sections, and insert content while preserving all images, formatting, and table structures intact.
 

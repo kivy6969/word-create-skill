@@ -1,185 +1,166 @@
 ---
 name: word-create
 description: >
-  修改 .docx 实训报告（改姓名/学号/实训内容/心得），保留图片排版截图原封不动。
-  Trigger: 用户要求"修改实训报告"、"改docx"、"改名字"、"改学号"、"改实训报告"、
-  "修改word"、"修改文档"、提供学分认定报告或实训报告要改个人信息等。
-  IMPORTANT: 用户要求修改任何 .docx 文件的文本内容时都应触发此 skill。
+  修改 .docx 文档的文本内容（字段替换、段落重写、内容补充），完整保留图片、
+  排版、表格结构。Trigger: 用户要求修改 Word 文档、替换文档中的文本、更新报告内容、
+  修改 .docx 文件、批量处理文档、填充模板等任何涉及 .docx 文本修改的请求。
 ---
 
-# WordCreate — .docx 实训报告修改
+# WordCreate — .docx 结构化文档修改
 
-修改 Word 实训报告，保留所有图片、排版、表格结构。只改文字，不动图。
+对 .docx 文档进行精确的文本修改，完整保留所有图片、排版与表格结构。
+适用于报告模板填充、批量文档更新、表格内容替换等场景。
 
 ## 依赖
 
-- Python `python-docx` 库
-- PowerShell（用于写脚本文件）
+- Python `python-docx`
+- PowerShell
 
 ## 核心原则
 
-1. **永远操作原文件，保存到新文件名**。原文件是最后的备份。
-2. **图片段是禁区**。任何包含 `<blip>` 的 paragraph 绝对不碰。
-3. **段落数必须匹配**。替换多段内容时，拆成和原来一样多的段落数。
-4. **中文走文件，不走命令行**。命令行传递中文必然乱码。
+1. **始终从原文件读取，输出到新文件**。永远不会覆盖源文件。
+2. **图片段落是只读区域**。任何包含 `<blip>` 元素的 paragraph 不作任何修改。
+3. **段落结构必须保持一致**。替换多段文本时，输出段落数须与输入段落数完全相同。
+4. **中文字符串通过文件传递，不经过命令行**。防止编码链损坏。
 
-## 工作流程
+## 工作流
 
-### 第一步：深度侦查
+### 第一步：文档侦查
 
-**必须做的**——在执行任何修改之前，先完整检查文档结构：
-
-```bash
-cd "目标目录"; python -c "
-import docx
-from docx import Document
-
-doc = Document(r'原文件.docx')
-
-for ti, table in enumerate(doc.tables):
-    print(f'=== Table {ti} ===')
-    for ri, row in enumerate(table.rows):
-        for ci, cell in enumerate(row.cells):
-            xml = cell._element.xml
-            drawings = cell._element.findall(
-                './/{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline')
-            print(f'Row{ri} Cell{ci}: paragraphs={len(cell.paragraphs)}, images={len(drawings)}')
-            for pi, p in enumerate(cell.paragraphs):
-                has_img = 'blip' in p._element.xml.lower()
-                print(f'  P{pi}: has_image={has_img}, text_len={len(p.text)}, text=[{p.text[:80]}]')
-"
-```
-
-**侦查清单**：
-- 哪个 table 是信息表（姓名/学号）→ 改 run.text 替换即可
-- 哪个 table 是实训操作内容 → 查哪些 cell 有图片，哪个 paragraph 有图片
-- 哪个 table 是实训心得 → 数有多少个 cell 有心得文字，每个 cell 有几个 paragraph
-- 标注：**图片 paragraph = 禁区，文字 paragraph = 操作区**
-
-### 第二步：准备中文内容
-
-中文内容写到独立的 UTF-8 txt 文件，**绝不写在 Python 脚本里**：
-
-```powershell
-$content = @'
-这里是要写的中文内容……
-可以有多行，但不能带中文引号""，全部用英文引号替代或用其他方式处理
-'@
-$content | Out-File -FilePath "e:\目标目录\_content.txt" -Encoding utf8
-```
-
-### 第三步：写修改脚本
-
-Python 脚本通过 PowerShell Out-File 写入（避免编码问题）：
-
-```powershell
-cd "目标目录";
-$pyscript = @'
-# -*- coding: utf-8 -*-
-import docx
-from docx import Document
-
-doc = Document(r"原文件路径")
-
-# 读取中文内容（用 utf-8-sig 自动去掉 BOM）
-with open("content_file.txt", "r", encoding="utf-8-sig") as f:
-    new_text = f.read().strip()
-
-# === 改姓名/学号：替换 run.text ===
-for table in doc.tables:
-    for row in table.rows:
-        for cell in row.cells:
-            for p in cell.paragraphs:
-                for run in p.runs:
-                    if "旧名字" in run.text:
-                        run.text = run.text.replace("旧名字", "新名字")
-                    if "旧学号" in run.text:
-                        run.text = run.text.replace("旧学号", "新学号")
-
-# === 改图片旁边的文字：只改特定的文字 paragraph，图不动 ===
-# 例如 Table 2 Row0 Cell1 有3段：P0=图, P1=空行, P2=图
-# 只给 P1 加文字：
-cell = doc.tables[2].rows[0].cells[1]
-p1 = cell.paragraphs[1]  # 第2段是空行，在两图之间
-p1.text = ""
-p1.add_run(operation_text)
-
-# === 改心得：逐段替换，保持段落数 ===
-# 例如心得在 Table 3 Row0 Cell1~Cell5，每个cell有5段
-row0 = doc.tables[3].rows[0]
-for ci in range(1, 6):  # 遍历每个内容cell
-    cell = row0.cells[ci]
-    for pi in range(5):  # 逐段替换
-        cell.paragraphs[pi].text = ""
-        cell.paragraphs[pi].add_run(new_paragraphs[pi])
-
-# 保存到临时文件名
-doc.save(r"输出文件_temp.docx")
-print("SAVED OK")
-'@
-$pyscript | Out-File -FilePath "_modify.py" -Encoding utf8
-python _modify.py
-```
-
-### 第四步：验证输出
-
-**修改完必须验证**，不能跳过：
+修改之前必须完整扫描文档结构。获取每一张表、每一个单元格的段落数以及图片分布情况：
 
 ```bash
 python -c "
 import docx
 from docx import Document
 
-doc = Document(r'输出文件.docx')
+doc = Document(r'input.docx')
 
-# 1. 确认图片没丢
-t2 = doc.tables[2]
-cell = t2.rows[0].cells[1]
-img_count = sum(1 for p in cell.paragraphs if 'blip' in p._element.xml.lower())
-print(f'Table2 Row0 Cell1 images: {img_count}')  # 应该和原来一样
-
-# 2. 确认段落结构
-t3 = doc.tables[3]
-for ci in range(1, 6):
-    pc = len(t3.rows[0].cells[ci].paragraphs)
-    print(f'Table3 Row0 Cell{ci} paragraphs: {pc}')  # 应该和原来一样
-
-# 3. 确认名字和学号
-print(f'Name: [{doc.tables[0].rows[0].cells[1].text}]')
-print(f'ID: [{doc.tables[0].rows[0].cells[5].text}]')
+for ti, table in enumerate(doc.tables):
+    print(f'=== Table {ti} ===')
+    for ri, row in enumerate(table.rows):
+        for ci, cell in enumerate(row.cells):
+            ns = '{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}'
+            drawings = cell._element.findall(f'.//{ns}inline')
+            print(f'Row{ri} Cell{ci}: paragraphs={len(cell.paragraphs)}, images={len(drawings)}')
+            for pi, p in enumerate(cell.paragraphs):
+                has_image = 'blip' in p._element.xml.lower()
+                text_preview = p.text[:80] if p.text.strip() else '(empty)'
+                print(f'  P{pi}: image={has_image}, len={len(p.text)}, [{text_preview}]')
 "
 ```
 
-验证三关全过 → 进入下一步。
+侦查结束后应明确：
+- 哪些单元格需要修改文本
+- 哪些段落包含图片（标记为不可修改）
+- 每个目标区域当前的段落数量
 
-### 第五步：最终命名 + 清理
+### 第二步：准备文本内容
+
+所有中文或其他非 ASCII 文本写入独立的 UTF-8 文件，禁止直接嵌入 Python 源码：
 
 ```powershell
-cd "目标目录";
-# 如果旧文件被占用，先让用户关掉Word
-Remove-Item -Path "最终文件名.docx" -Force -ErrorAction SilentlyContinue
-if (Test-Path "最终文件名.docx") {
-    Write-Output "文件被占用，请关闭Word后手动删除"
+$content = @'
+替换文本内容...
+'@
+$content | Out-File -FilePath "content.txt" -Encoding utf8
+```
+
+### 第三步：执行修改
+
+Python 脚本通过 PowerShell 的 `Out-File -Encoding utf8` 写入，以避免工具链编码问题：
+
+```powershell
+$pyscript = @'
+# -*- coding: utf-8 -*-
+from docx import Document
+
+doc = Document(r"input.docx")
+
+with open("content.txt", "r", encoding="utf-8-sig") as f:
+    new_text = f.read().strip()
+
+# 示例 A：替换表格中的字段值（如公司名称、日期、编号）
+for table in doc.tables:
+    for row in table.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                for run in p.runs:
+                    if "旧值" in run.text:
+                        run.text = run.text.replace("旧值", "新值")
+
+# 示例 B：在图片之间的空白段落插入文字说明
+# 某单元格有 3 段：P0=图片, P1=空白, P2=图片
+# 仅操作 P1，P0 和 P2 保持不动
+cell = doc.tables[2].rows[0].cells[1]
+middle_paragraph = cell.paragraphs[1]
+middle_paragraph.text = ""
+middle_paragraph.add_run(description_text)
+
+# 示例 C：逐段替换多段文本（保持段落数不变）
+# 某区域原有 N 段文本，替换内容也拆分为恰好 N 段
+target_cell = doc.tables[3].rows[0].cells[1]
+for i, paragraph_text in enumerate(replacement_paragraphs):
+    target_cell.paragraphs[i].text = ""
+    target_cell.paragraphs[i].add_run(paragraph_text)
+
+doc.save(r"output_temp.docx")
+print("done")
+'@
+$pyscript | Out-File -FilePath "_modify.py" -Encoding utf8
+python _modify.py
+```
+
+### 第四步：验证
+
+修改完成后必须对输出文件进行验证：
+
+```bash
+python -c "
+from docx import Document
+
+doc = Document(r'output_temp.docx')
+
+# 1. 图片数量校验（与侦查结果对比）
+for ti in [2]:  # 包含图片的表索引
+    table = doc.tables[ti]
+    for ri, ci in [(0, 1)]:  # 包含图片的单元格坐标
+        cell = table.rows[ri].cells[ci]
+        img_count = sum(1 for p in cell.paragraphs if 'blip' in p._element.xml.lower())
+        print(f'Table{ti} Row{ri} Cell{ci} images: {img_count}')
+
+# 2. 段落结构校验（与侦查结果对比）
+table = doc.tables[3]
+for ci in range(1, 6):
+    pc = len(table.rows[0].cells[ci].paragraphs)
+    print(f'Table3 Row0 Cell{ci} paragraphs: {pc}')
+
+# 3. 关键字段值校验
+print(f'Field value: [{doc.tables[0].rows[0].cells[1].text}]')
+"
+```
+
+三项全部通过 → 进入最终命名。
+
+### 第五步：命名与清理
+
+```powershell
+# 删除可能被锁定的旧文件（用户需先关闭 Word）
+Remove-Item -Path "output.docx" -Force -ErrorAction SilentlyContinue
+if (Test-Path "output.docx") {
+    Write-Output "文件被占用，请关闭 Word 后重试"
 } else {
-    Rename-Item -Path "输出文件_temp.docx" -NewName "最终文件名.docx"
-    # 清理临时文件
-    Remove-Item -Path "_modify.py", "_content.txt" -Force
+    Rename-Item -Path "output_temp.docx" -NewName "output.docx"
+    Remove-Item -Path "_modify.py", "content.txt" -Force
 }
 ```
 
-## 踩坑记录（为什么要这样做）
+## 常见问题与原因
 
-| 坑 | 原因 | 正确做法 |
+| 问题 | 原因 | 预防措施 |
 |---|---|---|
-| 图片消失 | `p.text = ''` 清了所有段落，包括含图片的 P0/P2 | 先侦查，只改 has_image=False 的段落 |
-| 心得变一坨 | 整段替换没保持段落数 | 原5段就拆成5段逐段替换 |
-| 中文乱码 | 中文经过命令行→Python 编码链断裂 | 中文存 UTF-8 txt，Python 读文件 |
-| 文件保存失败 | 输出文件已被 Word 打开 | 先存临时名，验证后 rename |
-| 脚本语法错误 | Write/Edit 工具写 `.py` 时编码损坏 | 用 PowerShell `Out-File -Encoding utf8` 写脚本 |
-
-## 边界
-
-- 本 skill 假设文档是标准 .docx 格式（非 .doc 老格式）
-- 图片检测通过 XML 中的 `<blip>` 标签判断
-- 如果表格结构异常（如合并单元格数量不匹配），先问用户确认再动手
-- 修改完成后提醒用户打开新文件检查，确认无误后再删原文件
+| 图片消失 | 清理文本时误清除了包含图片的段落 | 侦查阶段标记所有 `has_image=True` 的段落，修改时跳过 |
+| 段落合并为一段 | 将多段替换文本写入单个段落 | 保持段落数量一一对应，逐个替换 |
+| 中文输出乱码 | 中文字符串经命令行传递时编码丢失 | 通过 UTF-8 文件传递所有非 ASCII 文本 |
+| 保存失败 | 输出文件正被 Word 或其他进程占用 | 先写临时文件，验证后再改名 |
+| Python 脚本语法错误 | 源码文件经某些工具写入时编码损坏 | 始终用 PowerShell `Out-File -Encoding utf8` 写入 .py 文件 |
